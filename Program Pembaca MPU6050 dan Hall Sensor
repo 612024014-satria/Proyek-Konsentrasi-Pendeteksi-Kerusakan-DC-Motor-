@@ -1,0 +1,335 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// =====================================
+// PIN
+// =====================================
+
+#define SDA_PIN 8
+#define SCL_PIN 9
+
+#define MPU_ADDR 0x68
+#define HALL_PIN 4
+
+// =====================================
+// OLED
+// =====================================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+// =====================================
+// HALL SENSOR
+// =====================================
+
+volatile unsigned long pulseCount = 0;
+
+void IRAM_ATTR hallInterrupt() {
+  pulseCount++;
+}
+
+// =====================================
+// VARIABEL
+// =====================================
+
+float ax = 0;
+float ay = 0;
+float az = 0;
+
+float rpm = 0;
+
+unsigned long lastRPMTime = 0;
+
+// =====================================
+// SETUP
+// =====================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println(" ESP32-S3 MOTOR MONITORING");
+  Serial.println(" MPU6050 + HALL + OLED");
+  Serial.println("=================================");
+
+  // =================================
+  // I2C
+  // =================================
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // =================================
+  // CEK MPU6050
+  // =================================
+
+  Wire.beginTransmission(MPU_ADDR);
+
+  if (Wire.endTransmission() == 0) {
+
+    Serial.println("MPU6050 terdeteksi pada 0x68");
+
+  } else {
+
+    Serial.println("ERROR: MPU6050 tidak terdeteksi!");
+
+  }
+
+  // =================================
+  // BANGUNKAN MPU6050
+  // =================================
+
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // =================================
+  // SET ACCELEROMETER ±2g
+  // =================================
+
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // =================================
+  // HALL
+  // =================================
+
+  pinMode(HALL_PIN, INPUT_PULLUP);
+
+  attachInterrupt(
+    digitalPinToInterrupt(HALL_PIN),
+    hallInterrupt,
+    FALLING
+  );
+
+  Serial.println("Hall sensor siap.");
+
+  // =================================
+  // OLED
+  // =================================
+
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        OLED_ADDR
+      )) {
+
+    Serial.println("ERROR: OLED tidak terdeteksi!");
+
+  } else {
+
+    Serial.println("OLED terdeteksi.");
+
+    display.clearDisplay();
+
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setTextSize(1);
+
+    display.setCursor(0, 0);
+    display.println("MOTOR MONITORING");
+
+    display.setCursor(0, 20);
+    display.println("ESP32-S3");
+
+    display.display();
+
+    delay(1500);
+  }
+
+  Serial.println();
+  Serial.println("Sistem mulai...");
+}
+
+// =====================================
+// BACA MPU6050
+// =====================================
+
+void readMPU6050() {
+
+  Wire.beginTransmission(MPU_ADDR);
+
+  Wire.write(0x3B);
+
+  Wire.endTransmission(false);
+
+  Wire.requestFrom(MPU_ADDR, 6, true);
+
+  if (Wire.available() >= 6) {
+
+    int16_t rawAx =
+      Wire.read() << 8 | Wire.read();
+
+    int16_t rawAy =
+      Wire.read() << 8 | Wire.read();
+
+    int16_t rawAz =
+      Wire.read() << 8 | Wire.read();
+
+    ax = rawAx / 16384.0;
+    ay = rawAy / 16384.0;
+    az = rawAz / 16384.0;
+  }
+}
+
+// =====================================
+// OLED
+// =====================================
+
+void updateOLED(
+  float ax,
+  float ay,
+  float az,
+  unsigned long pulses,
+  float rpm
+) {
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+
+  // Judul
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.println("MOTOR MONITOR");
+
+  // Garis
+  display.drawLine(
+    0, 10,
+    127, 10,
+    SSD1306_WHITE
+  );
+
+  // Ax
+  display.setCursor(0, 15);
+
+  display.print("Ax:");
+  display.print(ax, 2);
+  display.print("g");
+
+  // Ay
+  display.setCursor(65, 15);
+
+  display.print("Ay:");
+  display.print(ay, 2);
+  display.print("g");
+
+  // Az
+  display.setCursor(0, 28);
+
+  display.print("Az:");
+  display.print(az, 2);
+  display.print("g");
+
+  // Pulse
+  display.setCursor(65, 28);
+
+  display.print("P:");
+  display.print(pulses);
+
+  // RPM
+  display.setTextSize(2);
+
+  display.setCursor(0, 44);
+
+  display.print("RPM:");
+
+  display.print((int)rpm);
+
+  display.display();
+}
+
+// =====================================
+// LOOP
+// =====================================
+
+void loop() {
+
+  static unsigned long lastSensorRead = 0;
+
+  unsigned long currentMillis = millis();
+
+  // =================================
+  // BACA MPU SETIAP 100 ms
+  // =================================
+
+  if (currentMillis - lastSensorRead >= 100) {
+
+    lastSensorRead = currentMillis;
+
+    readMPU6050();
+  }
+
+  // =================================
+  // HITUNG RPM SETIAP 1 DETIK
+  // =================================
+
+  if (currentMillis - lastRPMTime >= 1000) {
+
+    lastRPMTime = currentMillis;
+
+    // Ambil jumlah pulsa dengan aman
+    noInterrupts();
+
+    unsigned long pulses = pulseCount;
+
+    pulseCount = 0;
+
+    interrupts();
+
+    // =================================
+    // RPM
+    // =================================
+
+    // 1 magnet = 1 pulsa / putaran
+
+    rpm = pulses * 60.0;
+
+    // =================================
+    // SERIAL MONITOR
+    // =================================
+
+    Serial.print("Ax: ");
+    Serial.print(ax, 3);
+
+    Serial.print(" g | Ay: ");
+    Serial.print(ay, 3);
+
+    Serial.print(" g | Az: ");
+    Serial.print(az, 3);
+
+    Serial.print(" g | Pulses: ");
+    Serial.print(pulses);
+
+    Serial.print(" | RPM: ");
+    Serial.println(rpm, 1);
+
+    // =================================
+    // OLED
+    // =================================
+
+    updateOLED(
+      ax,
+      ay,
+      az,
+      pulses,
+      rpm
+    );
+  }
+}
