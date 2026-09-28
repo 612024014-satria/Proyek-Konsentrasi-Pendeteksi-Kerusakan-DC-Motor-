@@ -1,0 +1,288 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ================================
+// PIN CONFIGURATION
+// ================================
+#define SDA_PIN     8
+#define SCL_PIN     9
+
+#define MPU_ADDR    0x68
+#define HALL_PIN    4
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR     0x3C
+
+// ================================
+// SENSOR CONFIGURATION
+// ================================
+const int PPR = 1;   // 1 magnet = 1 pulse/revolution
+
+// Sampling frequency
+const unsigned long SAMPLE_INTERVAL_US = 10000; // 100 Hz
+
+// RPM calculation interval
+const unsigned long RPM_INTERVAL_MS = 1000;
+
+// OLED update interval
+const unsigned long OLED_INTERVAL_MS = 1000;
+
+// ================================
+// OLED
+// ================================
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+// ================================
+// VARIABLES
+// ================================
+volatile unsigned long pulseCount = 0;
+
+float ax = 0;
+float ay = 0;
+float az = 0;
+
+float rpm = 0;
+
+unsigned long lastSampleTime = 0;
+unsigned long lastRPMTime = 0;
+unsigned long lastOLEDTime = 0;
+
+unsigned long sampleNumber = 0;
+
+
+// ================================
+// HALL INTERRUPT
+// ================================
+void IRAM_ATTR hallInterrupt() {
+  pulseCount++;
+}
+
+
+// ================================
+// READ MPU6050
+// ================================
+void readMPU6050() {
+
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+
+  if (Wire.endTransmission(false) != 0) {
+    return;
+  }
+
+  Wire.requestFrom(MPU_ADDR, 6, true);
+
+  if (Wire.available() == 6) {
+
+    int16_t rawAx = Wire.read() << 8 | Wire.read();
+    int16_t rawAy = Wire.read() << 8 | Wire.read();
+    int16_t rawAz = Wire.read() << 8 | Wire.read();
+
+    // MPU6050 ±2g
+    ax = rawAx / 16384.0;
+    ay = rawAy / 16384.0;
+    az = rawAz / 16384.0;
+  }
+}
+
+
+// ================================
+// UPDATE RPM
+// ================================
+void updateRPM() {
+
+  noInterrupts();
+
+  unsigned long pulses = pulseCount;
+  pulseCount = 0;
+
+  interrupts();
+
+  // RPM = pulses / time × 60 / PPR
+  rpm = (pulses * 60.0) / PPR;
+}
+
+
+// ================================
+// UPDATE OLED
+// ================================
+void updateOLED() {
+
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println("DATA LOGGER 100 Hz");
+
+  display.setCursor(0, 12);
+  display.print("Ax: ");
+  display.println(ax, 2);
+
+  display.setCursor(0, 22);
+  display.print("Ay: ");
+  display.println(ay, 2);
+
+  display.setCursor(0, 32);
+  display.print("Az: ");
+  display.println(az, 2);
+
+  display.setCursor(0, 42);
+  display.print("RPM: ");
+  display.println(rpm, 0);
+
+  display.setCursor(0, 54);
+  display.print("N: ");
+  display.println(sampleNumber);
+
+  display.display();
+}
+
+
+// ================================
+// SETUP
+// ================================
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+  // I2C
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // ================================
+  // MPU6050 WAKE UP
+  // ================================
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // Accelerometer ±2g
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // ================================
+  // HALL SENSOR
+  // ================================
+  pinMode(HALL_PIN, INPUT_PULLUP);
+
+  attachInterrupt(
+    digitalPinToInterrupt(HALL_PIN),
+    hallInterrupt,
+    FALLING
+  );
+
+  // ================================
+  // OLED
+  // ================================
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        OLED_ADDR
+      )) {
+
+    Serial.println("OLED gagal!");
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println("ESP32-S3");
+  display.println("DATA LOGGER");
+  display.println();
+  display.println("MPU6050 : OK");
+  display.println("HALL    : OK");
+  display.println("RATE    : 100 Hz");
+
+  display.display();
+
+  delay(2000);
+
+  // ================================
+  // CSV HEADER
+  // ================================
+  Serial.println();
+  Serial.println("timestamp_ms,sample,ax,ay,az,rpm");
+
+  lastSampleTime = micros();
+  lastRPMTime = millis();
+  lastOLEDTime = millis();
+}
+
+
+// ================================
+// LOOP
+// ================================
+void loop() {
+
+  unsigned long currentMicros = micros();
+  unsigned long currentMillis = millis();
+
+  // ==========================================
+  // MPU6050 SAMPLING = 100 Hz
+  // ==========================================
+  if (currentMicros - lastSampleTime >= SAMPLE_INTERVAL_US) {
+
+    lastSampleTime += SAMPLE_INTERVAL_US;
+
+    // Baca accelerometer
+    readMPU6050();
+
+    sampleNumber++;
+
+    // ========================================
+    // OUTPUT CSV
+    // ========================================
+    Serial.print(currentMillis);
+    Serial.print(",");
+
+    Serial.print(sampleNumber);
+    Serial.print(",");
+
+    Serial.print(ax, 4);
+    Serial.print(",");
+
+    Serial.print(ay, 4);
+    Serial.print(",");
+
+    Serial.print(az, 4);
+    Serial.print(",");
+
+    Serial.println(rpm, 1);
+  }
+
+
+  // ==========================================
+  // UPDATE RPM EVERY 1 SECOND
+  // ==========================================
+  if (currentMillis - lastRPMTime >= RPM_INTERVAL_MS) {
+
+    updateRPM();
+
+    lastRPMTime += RPM_INTERVAL_MS;
+  }
+
+
+  // ==========================================
+  // UPDATE OLED
+  // ==========================================
+  if (currentMillis - lastOLEDTime >= OLED_INTERVAL_MS) {
+
+    updateOLED();
+
+    lastOLEDTime += OLED_INTERVAL_MS;
+  }
+}
